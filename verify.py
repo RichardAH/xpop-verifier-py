@@ -544,6 +544,6 @@ for line in sys.stdin:
 verification_result = verify(xpop, "ED45D1840EE724BE327ABE9146503D5848EFD5F38B6D5FEDE71E80ACCE5E6E738B")
 
 if verification_result == False:
-    print("Verification failed (tampering or damaged/incomplete/invalid data)")
+    print(json.dumps({"verified": False, "info": "Verification failed (tampering or damaged/incomplete/invalid data)"}))
 else:
-    print(verification_result)
+    print(json.dumps(verification_result))
