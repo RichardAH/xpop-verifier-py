@@ -32,6 +32,11 @@ def make_vl_bytes(l):
     else:
         return err("Cannot generate vl for length = " + str(l) + ", too large")
 
+def sha512(x):
+    m = hashlib.sha512()
+    m.update(x)
+    return m.digest()
+
 def sha512h(x):
     m = hashlib.sha512()
     m.update(x)
@@ -167,11 +172,16 @@ def verify(xpop, vl_key):
     if type(vl_key) == bytes:
         vl_key = hexlify(vl_key)
 
-    # Do the easiest checks first. If the vl key is wrong then everything is wrong.
+
+    ##
+    ## UNL
+    ##
+
+    # 1. If the vl key is wrong then everything is wrong.
     if vl_key.lower() != unl["public_key"].lower():
         return err("XPOP vl key is not one we recognise")
 
-    # Grab the manifest and signature as bytes objects
+    # 2. Grab the manifest and signature as bytes objects
     if not "manifest" in unl:
         return err("XPOP did not contain validation.unl.manifest")
     if not "signature" in unl:
@@ -184,13 +194,60 @@ def verify(xpop, vl_key):
     except:
         return err("XPOP invalid validation.unl.manifest (should be base64) or validation.unl.signature")
 
+    if not "MasterSignature" in manifest or not "Signature" in manifest:
+        return err("XPOP invalid validation.unl.manifest serialization")
 
-    # re-encode the manifest without signing fields so we can check the signature
-    manifestnosign = xrpl.core.binarycodec.encode_for_signing(manifest)
+    # 3. Re-encode the manifest without signing fields so we can check the signature
+    manifestnosign = b'MAN\x00' + \
+            unhexlify(xrpl.core.binarycodec.encode_for_signing(manifest)[8:])
 
-    # RH UPTO HERE
-    if not xrpl.core.keypairs.is_valid_message(unhexlify(manifestnosign), signature, vl_key):
+    # 4. Check master signature (vl_key over vl manifest)
+    if not xrpl.core.keypairs.is_valid_message(\
+        manifestnosign,\
+        unhexlify(manifest["MasterSignature"]), manifest["PublicKey"]):
         return err("XPOP vl signature validation failed")
+
+    # 5. Get UNL signing key
+    signing_key = manifest["SigningPubKey"]
+
+    # 6. Get raw UNL payload
+    payload = None
+    if not "blob" in unl:
+        return err("XPOP invalid validation.unl.blob")
+    
+    payload = base64.b64decode(unl["blob"])
+
+    # 7. Check UNL blob signature
+    if not xrpl.core.keypairs.is_valid_message(\
+        payload,\
+        unhexlify(unl["signature"]),
+        signing_key):
+        return err("XPOP invalid validation.unl.blob signature")
+
+    # RH NOTE: Execution to here means the unl blob is validly signed by a recognised key
+
+    # 8. Decode UNL blob
+    try:
+        payload = json.loads(payload)
+    except:
+        return err("XPOP invalid validation.unl.blob json")
+
+    if not "sequence" in payload:
+        return err("XPOP missing validation.unl.blob.sequence")
+
+    if not "expiration" in payload:
+        return err("XPOP missing validation.unl.blob.expiration")
+
+    if not "validators" in payload:
+        return err("XPOP missing validation.unl.blob.validators")
+
+    unlseq = payload["sequence"]        # these are not validated but are returned
+    unlexp = payload["expiration"]      # to the user(dev) for additional validation
+    validators = payload["validators"]
+
+    # 9. Check UNL internal manifests and get validator signing keys
+    #RH UPTO
+
 
 
     # Check if the transaction and meta is actually in the proof
