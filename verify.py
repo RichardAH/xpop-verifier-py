@@ -174,7 +174,7 @@ def verify(xpop, vl_key):
 
 
     ##
-    ## UNL
+    ## Part A: Validate and decode UNL
     ##
 
     # 1. If the vl key is wrong then everything is wrong.
@@ -189,7 +189,8 @@ def verify(xpop, vl_key):
     manifest = None
     signature = None
     try:
-        manifest = xrpl.core.binarycodec.decode(str(hexlify(base64.b64decode(unl["manifest"])), "utf-8"))
+        manifest = xrpl.core.binarycodec.decode(\
+                str(hexlify(base64.b64decode(unl["manifest"])), "utf-8"))
         signature = unhexlify(unl["signature"])
     except:
         return err("XPOP invalid validation.unl.manifest (should be base64) or validation.unl.signature")
@@ -243,12 +244,52 @@ def verify(xpop, vl_key):
 
     unlseq = payload["sequence"]        # these are not validated but are returned
     unlexp = payload["expiration"]      # to the user(dev) for additional validation
-    validators = payload["validators"]
+    validators = {}
 
     # 9. Check UNL internal manifests and get validator signing keys
-    #RH UPTO
+    for v in payload["validators"]:
+        if not "validation_public_key" in v:
+            return err("XPOP missing validation_public_key from unl entry")
+        if not "manifest" in v:
+            return err("XPOP missing manifest from unl entry")
+    
+        manifest = None
+        try:
+            manifest = base64.b64decode(v["manifest"])
+            manifest = str(hexlify(manifest), "utf-8")
+            manifest = xrpl.core.binarycodec.decode(manifest)
+        except:
+            return err("XPOP invalid manifest in unl entry")
+        
+        if not "MasterSignature" in manifest:
+            return err("XPOP manifest missing master signature in unl entry")
+
+        if not "SigningPubKey" in manifest:
+            return err("XPOP manifest missing signing key in unl entry")
 
 
+        # 10. Check each validator's manifest is signed correctly
+        #manifestnosign = b'MAN\x00' + \
+        #    unhexlify(xrpl.core.binarycodec.encode_for_signing(manifest)[8:])
+
+        # RH NOTE: this doesn't provide any real additioonal safety and uses a lot of
+        # cpu cycles so it's left commented oout
+        #if not xrpl.core.keypairs.is_valid_message(\
+        #    manifestnosign,
+        #    unhexlify(manifest["MasterSignature"]),
+        #    v["validation_public_key"]):
+        #    return err("XPOP a unl entry was invalidly signed")
+
+        # 11. Compute the node public address from the signing key
+        nodepub = xrpl.core.addresscodec.encode_node_public_key(\
+            unhexlify(manifest["SigningPubKey"]))
+
+        # 12. Add the verified validator to the verified validator list
+        validators[nodepub] = manifest["SigningPubKey"]
+
+    ##
+    ## Part B: Validate TXN and META proof, and compute ledger hash
+    ##
 
     # Check if the transaction and meta is actually in the proof
     computed_tx_hash_and_meta = hash_txn_and_meta(transaction["blob"], transaction["meta"])
@@ -264,11 +305,35 @@ def verify(xpop, vl_key):
         hash_ledger(ledger["index"], ledger["coins"], ledger["phash"], computed_tx_root, \
             ledger["acroot"], ledger["pclose"], ledger["close"], ledger["cres"], ledger["flags"])
 
-    # At this execution point: all operations pertaining to the transaction itself are now done.
-    # We have computed a ledger hash for a ledger that, supposedly, the supplied transaction appears in.
-    # Now we must decide whether the provided validation information constitutes a proof of valdation
-    # for this ledger hash.
 
+    ##
+    ## Part C: Check validations to see if a quorum was reached on the computed ledgerhash
+    ##
+
+    quorum = math.ceil(len(validators) * 0.8)
+    count = 0
+
+    for nodepub in data:
+        if nodepub in validators:
+            #try:
+            # RH UPTO: xrpl-py lacks the definition for sfCookie, so this code
+            # is currently breaking. Options: byte manipulation, update xrpl-py
+            valmsg = data[nodepub].upper()
+            print(valmsg)
+            print(xrpl.core.binarycodec.decode(valmsg))
+            #print(xrpl.core.binarycodec.decode(data[nodepub].upper()))
+            #valmsg = xrpl.core.binarycodec.decode(data[nodepub])
+            #print(valmsg)
+            #except:
+            #    err("Warning: XPOP contained invalid validation from " + nodepub)
+            #    continue
+            #count += 1
+
+
+
+    ##
+    ## Part D: Return useful information to the caller
+    ##
 
     try:
         tx = xrpl.core.binarycodec.decode(transaction["blob"])
