@@ -1,3 +1,9 @@
+# XRPL Proof of Payment Verifier
+# Author: Richard Holland
+# Date: 24/7/21
+# Verifies a proof of payment payload (Note: XLS pending)
+# See: https://github.com/RichardAH/xrpl-proof-of-validation
+
 import sys
 import json
 import xrpl
@@ -5,11 +11,6 @@ import hashlib
 from binascii  import hexlify, unhexlify
 import math
 import base64
-
-#const prefix_LWR = '4C575200'
-#const prefix_SND = '534E4400'
-#const prefix_MIN = '4D494E00'
-#const prefix_TXN = '54584E00'
 
 def err(e):
     sys.stderr.write("Error: " + e + "\n")
@@ -140,7 +141,7 @@ def process_validation_message(val):
 
     return ret
 
-
+# Create a variable length prefix for a xrpl serialized vl field
 def make_vl_bytes(l):
     if type(l) == float:
         l = ceil(l)
@@ -173,6 +174,7 @@ def hash_txn(txn):
         txn = unhexlify(txn)
     return sha512h(b'TXN\x00' + txn)
 
+# Hash the txn and meta data as a leaf node in the shamap
 def hash_txn_and_meta(txn, meta):
     if type(txn) == str:
         txn = unhexlify(txn)
@@ -351,8 +353,6 @@ def verify(xpop, vl_key):
         signing_key):
         return err("XPOP invalid validation.unl.blob signature")
 
-    # RH NOTE: Execution to here means the unl blob is validly signed by a recognised key
-
     # 8. Decode UNL blob
     try:
         payload = json.loads(payload)
@@ -397,8 +397,8 @@ def verify(xpop, vl_key):
         #manifestnosign = b'MAN\x00' + \
         #    unhexlify(xrpl.core.binarycodec.encode_for_signing(manifest)[8:])
 
-        # RH NOTE: this doesn't provide any real additioonal safety and uses a lot of
-        # cpu cycles so it's left commented oout
+        # RH NOTE: this doesn't provide any real additional safety since the whole blob is already signed
+        # and verifying these uses a lot of cpu cycles... so it's left commented oout
         #if not xrpl.core.keypairs.is_valid_message(\
         #    manifestnosign,
         #    unhexlify(manifest["MasterSignature"]),
@@ -416,16 +416,16 @@ def verify(xpop, vl_key):
     ## Part B: Validate TXN and META proof, and compute ledger hash
     ##
 
-    # Check if the transaction and meta is actually in the proof
+    # 13. Check if the transaction and meta is actually in the proof
     computed_tx_hash_and_meta = hash_txn_and_meta(transaction["blob"], transaction["meta"])
 
     if not proof_contains(transaction["proof"], computed_tx_hash_and_meta):
         return err("Txn and meta were not present in provided proof")
 
-    # Now compute the tx merkle root
+    # 14. Compute the tx merkle root
     computed_tx_root = hash_proof(transaction["proof"])
 
-    # Next compute the ledger hash
+    # 15. Compute the ledger hash from the tx merkle root
     computed_ledger_hash = \
         hash_ledger(ledger["index"], ledger["coins"], ledger["phash"], computed_tx_root, \
             ledger["acroot"], ledger["pclose"], ledger["close"], ledger["cres"], ledger["flags"])
@@ -439,41 +439,48 @@ def verify(xpop, vl_key):
     ## Part C: Check validations to see if a quorum was reached on the computed ledgerhash
     ##
 
+    # 16. Calculate the minimum number of UNL validation signatures we need
     quorum = math.ceil(len(validators) * 0.8)
     votes = 0
 
+    # 17. Step through the provided validation messages and check each one's signature and ledger hash
     for nodepub in data:
-        if nodepub in validators:
-            # Parse the validation message
-            valmsg = process_validation_message(data[nodepub])
-            if valmsg == False:
-                err("Warning: XPOP contained invalid validation from " + nodepub)
-                continue
 
-            # Check the signing key
-            if valmsg["key"] != validators[nodepub]:
-                err("Warning: XPOP contained invalid KEY for validation from " + nodepub)
-                continue
-            
-            # Check the ledger hash
-            if valmsg["ledger_hash"] != computed_ledger_hash:
-                #err("Warning: XPOP contained validation for another ledger hash")
-                continue
-            
-            # Check the signature
-            valpayload = b'VAL\x00' + valmsg["without_signature"]
-            #valhash = sha512h(valpayload)
-            if not xrpl.core.keypairs.is_valid_message(valpayload, valmsg["signature"], valmsg["key"]):
-                err("Warning: XPOP contained validation with invalid signature")
-                continue
+        # RH NOTE: Any validation messages not the UNL are skipped, although this should probably be an error
+        if not nodepub in validators:
+            continue
+        
+        # 18. Parse the validation message
+        valmsg = process_validation_message(data[nodepub])
+        if valmsg == False:
+            err("Warning: XPOP contained invalid validation from " + nodepub)
+            continue
 
-            votes += 1
+        # 19. Check the signing key matches the key we have on file from the (now verified) UNL
+        if valmsg["key"] != validators[nodepub]:
+            err("Warning: XPOP contained invalid KEY for validation from " + nodepub)
+            continue
+        
+        # 20. Check the ledger hash in the validation message matches the one we generated from tx merkel
+        if valmsg["ledger_hash"] != computed_ledger_hash:
+            #err("Warning: XPOP contained validation for another ledger hash")
+            continue
+        
+        # 21. Check the signature on the validation message (expensive)
+        valpayload = b'VAL\x00' + valmsg["without_signature"]
+        if not xrpl.core.keypairs.is_valid_message(valpayload, valmsg["signature"], valmsg["key"]):
+            err("Warning: XPOP contained validation with invalid signature")
+            continue
+
+        # 22. If all is well the successfully verified validation message counts as a vote toward quorum
+        votes += 1
     
 
     ##
     ## Part D: Return useful information to the caller
     ##
 
+    # 23. If there were insufficiently many votes in favour of the txn we always return False
     if votes < quorum:
         return False
 
@@ -511,7 +518,7 @@ def verify(xpop, vl_key):
     if "Destination" in tx:
         ret["tx_destination"] = tx["Destination"]
 
-    # Search the meta for the modified node corresponding to the destination account
+    # 24. Search the meta for the modified nodes and construct a delivered amount field for xrp payments
     if "AffectedNodes" in meta:
         for af in meta["AffectedNodes"]:
             if "ModifiedNode" in af:
@@ -527,12 +534,16 @@ def verify(xpop, vl_key):
     return ret
 
 
+# Below is just an example on how to use this. It reads an xpop from stdin and run the verifier against
+# the XRPLF's validation list key (at time of writing)
+
 xpop = ''
 for line in sys.stdin:
     xpop += line.rstrip()
 
 verification_result = verify(xpop, "ED45D1840EE724BE327ABE9146503D5848EFD5F38B6D5FEDE71E80ACCE5E6E738B")
+
 if verification_result == False:
     print("Verification failed (tampering or damaged/incomplete/invalid data)")
-
-print(json.dumps(verification_result))
+else:
+    print(verification_result)
