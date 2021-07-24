@@ -12,8 +12,134 @@ import base64
 #const prefix_TXN = '54584E00'
 
 def err(e):
-    sys.stderr.write("Error: " + e)
+    sys.stderr.write("Error: " + e + "\n")
     return False
+
+# This function shouldn't technically be needed but xrpl-py needs updating
+# for validation fields. There's only one signing field: sfSignature, we need to 
+# clip around it.
+# @return {
+#   without_signature: input sans signing field, 
+#   key: key, signature: signature, ledger_hash: ledgerhash }
+def process_validation_message(val):
+    if type(val) == str:
+        val = unhexlify(val)
+    
+    upto = 0
+    rem = len(val)
+
+    ret = {}
+
+    sig_start = 0
+    sig_end = 0
+    
+    # Flags
+    if val[upto] != 0x22 or rem < 5:
+        return err("validation: sfFlags missing")
+    upto += 5; rem -= 5;
+
+    # LedgerSequence
+    if val[upto] != 0x26 or rem < 5:
+        return err("validation: sfLedgerSequence missing")
+    upto += 5; rem -= 5;
+
+    # CloseTime (optional)
+    if val[upto] == 0x27:
+        if rem < 5:
+            return err("validation: sfCloseTime missing payload")
+        upto += 5; rem -= 5
+
+    # SigningTime
+    if val[upto] != 0x29 or rem < 5:
+        return err("validation: sfSigningTime missing")
+    upto += 5; rem -= 5;
+
+    # LoadFee (optional)
+    if val[upto] == 0x20 and rem >= 2 and val[upto+1] == 0x18:
+        if rem < 6:
+            return err("validation: sfLoadFee missing payload")
+        upto += 6; rem -= 6
+        
+    # ReserveBase (optional)
+    if val[upto] == 0x20 and rem >= 2 and val[upto+1] == 0x1F:
+        if rem < 6:
+            return err("validation: sfReserveBase missing payload")
+        upto += 6; rem -= 6
+
+    # ReserveIncrement (optional)
+    if val[upto] == 0x20 and rem >= 2 and val[upto+1] == 0x20:
+        if rem < 6:
+            return err("validation: sfReserveIncrement missing payload")
+        upto += 6; rem -= 6
+    
+    # BaseFee (optional)
+    if val[upto] == 0x35:
+        if rem < 9:
+            return err("validation: sfBaseFee missing payload")
+        upto += 9; rem -= 9
+
+    # Cookie (optional)
+    if val[upto] == 0x3A:
+        if rem < 9:
+            return err("validation: sfCookie missing payload")
+        upto += 9; rem -= 9
+   
+    # ServerVersion (optional)
+    if val[upto] == 0x3B:
+        if rem < 9:
+            return err("validation: sfServerVersion missing payload")
+        upto += 9; rem -= 9
+
+    # LedgerHash
+    if val[upto] != 0x51 or rem < 33:
+        return err("validation: sfLedgerHash missing")
+    
+    ret["ledger_hash"] = str(hexlify(val[upto+1:upto+33]), 'utf-8').upper()
+    upto += 33; rem -= 32
+
+    # ConsensusHash (optional)
+    if val[upto] == 0x50 and rem >= 2 and val[upto+1] == 0x17:
+        if rem < 34:
+            return err("validation: sfConsensusHash payload missing")
+        upto += 34; rem -= 34
+
+    # ValidatedHash (optioonal)
+    if val[upto] == 0x50 and rem >= 2 and val[upto+1] == 0x19:
+        if rem < 34:
+            return err("validation: sfValidatedHash payload missing")
+        upto += 34; rem -= 34
+
+    # SigningPubKey
+    if val[upto] != 0x73 or rem < 3:
+        return err("validation: sfSigningPubKey missing")
+
+    keysize = val[upto+1]
+    upto += 2; rem -= 2
+    if keysize > rem:
+        return err("validation: sfSigningPubKey incomplete")
+
+    ret["key"] = str(hexlify(val[upto:upto+keysize]), 'utf-8').upper()
+
+    upto += keysize; rem -= keysize
+
+    # Signature
+    sigstart = upto
+    if val[upto] != 0x76 or rem < 3:
+        return err("validation: sfSignature missing")
+    
+    sigsize = val[upto+1] 
+    upto += 2; rem -= 2
+    if sigsize > rem:
+        return err("validation: sfSignature incomplete")
+    
+    ret["signature"] = val[upto:upto+sigsize]
+
+    upto += sigsize; rem -= sigsize
+
+    ret["without_signature"] = val[:sigstart] + val[upto:]
+
+    return ret
+
 
 def make_vl_bytes(l):
     if type(l) == float:
@@ -170,7 +296,7 @@ def verify(xpop, vl_key):
         return err("XPOP did not contain validation.unl.public_key")
 
     if type(vl_key) == bytes:
-        vl_key = hexlify(vl_key)
+        vl_key = hexlify(vl_key).upper()
 
 
     ##
@@ -267,7 +393,6 @@ def verify(xpop, vl_key):
         if not "SigningPubKey" in manifest:
             return err("XPOP manifest missing signing key in unl entry")
 
-
         # 10. Check each validator's manifest is signed correctly
         #manifestnosign = b'MAN\x00' + \
         #    unhexlify(xrpl.core.binarycodec.encode_for_signing(manifest)[8:])
@@ -305,6 +430,10 @@ def verify(xpop, vl_key):
         hash_ledger(ledger["index"], ledger["coins"], ledger["phash"], computed_tx_root, \
             ledger["acroot"], ledger["pclose"], ledger["close"], ledger["cres"], ledger["flags"])
 
+    if computed_ledger_hash == False:
+        return False
+
+    computed_ledger_hash = str(hexlify(computed_ledger_hash), 'utf-8').upper()
 
     ##
     ## Part C: Check validations to see if a quorum was reached on the computed ledgerhash
@@ -315,25 +444,42 @@ def verify(xpop, vl_key):
 
     for nodepub in data:
         if nodepub in validators:
-            #try:
-            # RH UPTO: xrpl-py lacks the definition for sfCookie, so this code
-            # is currently breaking. Options: byte manipulation, update xrpl-py
-            valmsg = data[nodepub].upper()
-            print(valmsg)
-            print(xrpl.core.binarycodec.decode(valmsg))
-            #print(xrpl.core.binarycodec.decode(data[nodepub].upper()))
-            #valmsg = xrpl.core.binarycodec.decode(data[nodepub])
-            #print(valmsg)
-            #except:
-            #    err("Warning: XPOP contained invalid validation from " + nodepub)
-            #    continue
-            #count += 1
+            # Parse the validation message
+            valmsg = process_validation_message(data[nodepub])
+            if valmsg == False:
+                err("Warning: XPOP contained invalid validation from " + nodepub)
+                continue
 
+            # Check the signing key
+            if valmsg["key"] != validators[nodepub]:
+                err("Warning: XPOP contained invalid KEY for validation from " + nodepub)
+                continue
+            
+            # Check the ledger hash
+            if valmsg["ledger_hash"] != computed_ledger_hash:
+                err("Warning: XPOP contained validation for another ledger hash")
+                continue
+            
+            # Check the signature
+            valpayload = b'VAL\x00' + valmsg["without_signature"]
+            print(hexlify(valpayload))
+            valhash = sha512h(valpayload)
+            if not xrpl.core.keypairs.is_valid_message(\
+                valhash,\
+                valmsg["signature"],\
+                validators[nodepub]):
+                err("Warning: XPOP contained validation with invalid signature")
+                continue
 
+            count += 1
+    
 
     ##
     ## Part D: Return useful information to the caller
     ##
+
+    if count < quorum:
+        return False
 
     try:
         tx = xrpl.core.binarycodec.decode(transaction["blob"])
@@ -341,17 +487,25 @@ def verify(xpop, vl_key):
     except:
         return err("Error decoding txblob and meta")
 
-    return (tx, meta)
+    return {
+            _verified: True,
+            tx: tx,
+            meta: meta,
+            ledger_hash: computed_ledger_hash,
+            ledger_index: ledger["index"],
+            ledger_unixtime: xrpl.utils.ripple_time_to_posix(ledger["close"]),
+            quorum: quroum,
+            validation_count: count,
+            vl_key: vl_key
+        }
 
-#print(sha512h(b''))
 
 xpop = ''
 for line in sys.stdin:
     xpop += line.rstrip()
 
-#print(
 verification_result = verify(xpop, "ED45D1840EE724BE327ABE9146503D5848EFD5F38B6D5FEDE71E80ACCE5E6E738B")
-if type(verification_result) == bool:
+if verification_result == False:
     print("Verification failed (tampering or damaged/incomplete/invalid data)")
 
 print(verification_result)
