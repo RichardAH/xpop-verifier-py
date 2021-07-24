@@ -457,7 +457,7 @@ def verify(xpop, vl_key):
             
             # Check the ledger hash
             if valmsg["ledger_hash"] != computed_ledger_hash:
-                err("Warning: XPOP contained validation for another ledger hash")
+                #err("Warning: XPOP contained validation for another ledger hash")
                 continue
             
             # Check the signature
@@ -483,20 +483,48 @@ def verify(xpop, vl_key):
     except:
         return err("Error decoding txblob and meta")
 
-    return {
-            "verified": True,
-            "tx_blob": tx,
-            "tx_meta": meta,
-            "ledger_hash": computed_ledger_hash,
-            "ledger_index": ledger["index"],
-            "ledger_unixtime": xrpl.utils.ripple_time_to_posix(ledger["close"]),
-            "validator_quorum": quorum,
-            "validator_count": len(validators),
-            "validator_votes": votes,
-            "vl_master_key": vl_key,
-            "vl_expiration_unixtime": xrpl.utils.ripple_time_to_posix(unlexp),
-            "vl_sequence": unlseq
-        }
+
+    ret = {
+        "verified": True,
+        "tx_blob": tx,
+        "tx_meta": meta,
+        "ledger_hash": computed_ledger_hash,
+        "ledger_index": ledger["index"],
+        "ledger_unixtime": xrpl.utils.ripple_time_to_posix(ledger["close"]),
+        "validator_quorum": quorum,
+        "validator_count": len(validators),
+        "validator_votes": votes,
+        "vl_master_key": vl_key,
+        "vl_expiration_unixtime": xrpl.utils.ripple_time_to_posix(unlexp),
+        "vl_sequence": unlseq,
+        "tx_source": tx["Account"],
+    }
+
+    if "InvoiceID" in tx:
+        ret["tx_invoice_id"] = tx["InvoiceID"]
+
+    ret["tx_is_payment"] = tx["TransactionType"] == "Payment"
+
+    if "DestinationTag" in tx:
+        ret["tx_destination_tag"] = tx["DestinationTag"]
+
+    if "Destination" in tx:
+        ret["tx_destination"] = tx["Destination"]
+
+    # Search the meta for the modified node corresponding to the destination account
+    if "AffectedNodes" in meta:
+        for af in meta["AffectedNodes"]:
+            if "ModifiedNode" in af:
+                mn = af["ModifiedNode"]
+                if "FinalFields" in mn and "PreviousFields" in mn and \
+                mn["LedgerEntryType"] == "AccountRoot" and "Account" in mn["FinalFields"] and \
+                mn["FinalFields"]["Account"] == tx["Destination"] and \
+                "Balance" in mn["PreviousFields"] and "Balance" in mn["FinalFields"]:
+                    ret["tx_delivered_drops"] = \
+                            int(mn["FinalFields"]["Balance"]) - int(mn["PreviousFields"]["Balance"])
+                    break
+
+    return ret
 
 
 xpop = ''
@@ -507,4 +535,4 @@ verification_result = verify(xpop, "ED45D1840EE724BE327ABE9146503D5848EFD5F38B6D
 if verification_result == False:
     print("Verification failed (tampering or damaged/incomplete/invalid data)")
 
-print(verification_result)
+print(json.dumps(verification_result))
