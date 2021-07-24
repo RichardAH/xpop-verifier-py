@@ -517,19 +517,18 @@ def verify(xpop, vl_key):
 
     if "Destination" in tx:
         ret["tx_destination"] = tx["Destination"]
-
-    # 24. Search the meta for the modified nodes and construct a delivered amount field for xrp payments
-    if "AffectedNodes" in meta:
-        for af in meta["AffectedNodes"]:
-            if "ModifiedNode" in af:
-                mn = af["ModifiedNode"]
-                if "FinalFields" in mn and "PreviousFields" in mn and \
-                mn["LedgerEntryType"] == "AccountRoot" and "Account" in mn["FinalFields"] and \
-                mn["FinalFields"]["Account"] == tx["Destination"] and \
-                "Balance" in mn["PreviousFields"] and "Balance" in mn["FinalFields"]:
-                    ret["tx_delivered_drops"] = \
-                            int(mn["FinalFields"]["Balance"]) - int(mn["PreviousFields"]["Balance"])
-                    break
+        # 24. Search the meta for the modified nodes and construct a delivered amount field for xrp payments
+        if "AffectedNodes" in meta:
+            for af in meta["AffectedNodes"]:
+                if "ModifiedNode" in af:
+                    mn = af["ModifiedNode"]
+                    if "FinalFields" in mn and "PreviousFields" in mn and \
+                    mn["LedgerEntryType"] == "AccountRoot" and "Account" in mn["FinalFields"] and \
+                    mn["FinalFields"]["Account"] == tx["Destination"] and \
+                    "Balance" in mn["PreviousFields"] and "Balance" in mn["FinalFields"]:
+                        ret["tx_delivered_drops"] = \
+                                int(mn["FinalFields"]["Balance"]) - int(mn["PreviousFields"]["Balance"])
+                        break
 
     return ret
 
