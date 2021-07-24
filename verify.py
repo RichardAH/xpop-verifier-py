@@ -440,7 +440,7 @@ def verify(xpop, vl_key):
     ##
 
     quorum = math.ceil(len(validators) * 0.8)
-    count = 0
+    votes = 0
 
     for nodepub in data:
         if nodepub in validators:
@@ -462,23 +462,19 @@ def verify(xpop, vl_key):
             
             # Check the signature
             valpayload = b'VAL\x00' + valmsg["without_signature"]
-            print(hexlify(valpayload))
-            valhash = sha512h(valpayload)
-            if not xrpl.core.keypairs.is_valid_message(\
-                valhash,\
-                valmsg["signature"],\
-                validators[nodepub]):
+            #valhash = sha512h(valpayload)
+            if not xrpl.core.keypairs.is_valid_message(valpayload, valmsg["signature"], valmsg["key"]):
                 err("Warning: XPOP contained validation with invalid signature")
                 continue
 
-            count += 1
+            votes += 1
     
 
     ##
     ## Part D: Return useful information to the caller
     ##
 
-    if count < quorum:
+    if votes < quorum:
         return False
 
     try:
@@ -488,15 +484,18 @@ def verify(xpop, vl_key):
         return err("Error decoding txblob and meta")
 
     return {
-            _verified: True,
-            tx: tx,
-            meta: meta,
-            ledger_hash: computed_ledger_hash,
-            ledger_index: ledger["index"],
-            ledger_unixtime: xrpl.utils.ripple_time_to_posix(ledger["close"]),
-            quorum: quroum,
-            validation_count: count,
-            vl_key: vl_key
+            "verified": True,
+            "tx_blob": tx,
+            "tx_meta": meta,
+            "ledger_hash": computed_ledger_hash,
+            "ledger_index": ledger["index"],
+            "ledger_unixtime": xrpl.utils.ripple_time_to_posix(ledger["close"]),
+            "validator_quorum": quorum,
+            "validator_count": len(validators),
+            "validator_votes": votes,
+            "vl_master_key": vl_key,
+            "vl_expiration_unixtime": xrpl.utils.ripple_time_to_posix(unlexp),
+            "vl_sequence": unlseq
         }
 
 
