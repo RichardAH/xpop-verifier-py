@@ -188,7 +188,9 @@ def hash_txn_and_meta(txn, meta):
     if vl1 == False or vl2 == False:
         return False
 
-    return sha512h(b'SND\x00' + vl1 + txn + vl2 + meta + hash_txn(txn))
+    payload = b'SND\x00' + vl1 + txn + vl2 + meta + hash_txn(txn)
+    #print("payload1", hexlify(payload))
+    return sha512h(payload)
 
 
 def hash_ledger(idx, coins, phash, txroot, acroot, pclose, close, res, flags):
@@ -225,39 +227,64 @@ def hash_ledger(idx, coins, phash, txroot, acroot, pclose, close, res, flags):
     if type(phash) != bytes or type(txroot) != bytes or type(acroot) != bytes:
         return err("Invalid bytes arguments to hash_ledger")
 
-    return sha512h(b'LWR\x00' + idx + coins + phash + txroot + acroot + pclose + close + res + flags)
+    payload = b'LWR\x00' + idx + coins + phash + txroot + acroot + pclose + close + res + flags
+    return sha512h(payload)
 
-def hash_proof(proof):
-    if type(proof) != list:
-        return err('Proof must be a list')
+def hash_proof(proof, depth=0):
+    if type(proof) != list and type(proof) != dict:
+        return err('Proof must be a list or dict')
     
-    if len(proof) < 16:
+    if type(proof) == list and len(proof) < 16:
         return False
 
     hasher = hashlib.sha512()
     hasher.update(b'MIN\x00')
 
-    for i in range(16):
-        if type(proof[i]) == str:
-            hasher.update(unhexlify(proof[i]))
-        elif type(proof[i]) == list:
-            hasher.update(hash_proof(proof[i]))
+    if type(proof) == list:
+        for i in range(16):
+            if type(proof[i]) == str:
+                hasher.update(unhexlify(proof[i]))
+            elif type(proof[i]) == list:
+                hasher.update(hash_proof(proof[i], depth+1))
+            else:
+                return err("Unknown object in proof list")
+    else:
+        if 'children' in proof and len(proof['children']) > 0:
+            for x in range(16):
+                i = "0123456789ABCDEF"[x]
+                if not i in proof['children']:
+                    hasher.update(bytes(32))
+                    continue
+                h = hash_proof(proof['children'][i], depth+1)
+                hasher.update(h)
+        elif 'hash' in proof:
+            return unhexlify(proof['hash'])
         else:
-            return err("Unknown object in proof list")
+            return err("Missing hash key in proof leaf")
 
     return hasher.digest()[:32]
     
 
 def proof_contains(proof, h):
-    if type(proof) != list or len(proof) < 16:
+    if type(proof) != list and type(proof) != dict:
         return False
+
+    if "children" in proof:
+        return proof_contains(proof["children"], h)
 
     if type(h) == str:
         h = unhexlify(h)
 
-    for i in range(16):
+    for x in range(16):
+        i = x
+        if type(proof) == dict:
+            i = "0123456789ABCDEF"[x]
+
+        if not i in proof:
+            continue
         if type(proof[i]) == str and unhexlify(proof[i]) == h or \
-        type(proof[i]) == list and proof_contains(proof[i], h):
+               'hash' in proof[i] and unhexlify(proof[i]['hash']) == h or \
+                proof_contains(proof[i], h):
             return True
 
     return False
@@ -372,6 +399,8 @@ def verify(xpop, vl_key):
     unlexp = payload["expiration"]      # to the user(dev) for additional validation
     validators = {}
 
+    validators_master_key = {} # map of master key to signing key
+
     # 9. Check UNL internal manifests and get validator signing keys
     for v in payload["validators"]:
         if not "validation_public_key" in v:
@@ -408,9 +437,12 @@ def verify(xpop, vl_key):
         # 11. Compute the node public address from the signing key
         nodepub = xrpl.core.addresscodec.encode_node_public_key(\
             unhexlify(manifest["SigningPubKey"]))
+        nodemaster = xrpl.core.addresscodec.encode_node_public_key(\
+            unhexlify(manifest["PublicKey"]))
 
         # 12. Add the verified validator to the verified validator list
         validators[nodepub] = manifest["SigningPubKey"]
+        validators_master_key[nodemaster] = nodepub
 
     ##
     ## Part B: Validate TXN and META proof, and compute ledger hash
@@ -430,6 +462,7 @@ def verify(xpop, vl_key):
         hash_ledger(ledger["index"], ledger["coins"], ledger["phash"], computed_tx_root, \
             ledger["acroot"], ledger["pclose"], ledger["close"], ledger["cres"], ledger["flags"])
 
+
     if computed_ledger_hash == False:
         return False
 
@@ -444,14 +477,29 @@ def verify(xpop, vl_key):
     votes = 0
 
     # 17. Step through the provided validation messages and check each one's signature and ledger hash
+    used_key = {}
+
     for nodepub in data:
+
+        datakey = nodepub
+
+        if nodepub in validators_master_key and validators_master_key[nodepub] in validators:
+            used_key[nodepub] = True
+            nodepub = validators_master_key[nodepub]
 
         # RH NOTE: Any validation messages not the UNL are skipped, although this should probably be an error
         if not nodepub in validators:
+            print("nodepub not in validators: ", nodepub)
             continue
         
+        if nodepub in used_key:
+            continue
+
+        used_key[nodepub] = True
+
+
         # 18. Parse the validation message
-        valmsg = process_validation_message(data[nodepub])
+        valmsg = process_validation_message(data[datakey])
         if valmsg == False:
             err("Warning: XPOP contained invalid validation from " + nodepub)
             continue
@@ -540,7 +588,8 @@ xpop = ''
 for line in sys.stdin:
     xpop += line.rstrip()
 
-verification_result = verify(xpop, "ED45D1840EE724BE327ABE9146503D5848EFD5F38B6D5FEDE71E80ACCE5E6E738B")
+verification_result = verify(xpop, "ED264807102805220DA0F312E71FC2C69E1552C9C5790F6C25E3729DEB573D5860")
+        #"ED45D1840EE724BE327ABE9146503D5848EFD5F38B6D5FEDE71E80ACCE5E6E738B")
 
 if verification_result == False:
     print(json.dumps({"verified": False, "info": "Verification failed (tampering or damaged/incomplete/invalid data)"}))
